@@ -7,10 +7,11 @@
     "test": "jest",
     "test:unit": "jest tests/unit",
     "test:integration": "jest tests/integration",
-    "build": "func compile",
+    "build": "ts-node scripts/compile-contracts.ts",
     "deploy:factory": "ts-node scripts/deploy-factory.ts",
     "create:launch": "ts-node scripts/create-launch.ts",
-    "buy": "ts-node scripts/buy-tokens.ts"
+    "buy": "ts-node scripts/buy-tokens.ts",
+    "compile": "ts-node scripts/compile-contracts.ts"
   },
   "keywords": [
     "ton",
