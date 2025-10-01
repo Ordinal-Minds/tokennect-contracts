@@ -2,7 +2,7 @@ import { Blockchain, SandboxContract, TreasuryContract } from '@ton/sandbox';
 import { Cell, toNano } from '@ton/core';
 import { BondingCurve } from '../../wrappers/BondingCurve';
 import { expectWithinPercent } from '../helpers/expect-helpers';
-import '@ton/test-utils';
+
 
 describe('BondingCurve - Price Calculation', () => {
     let code: Cell;

@@ -26,6 +26,13 @@ const int ERROR_NOT_FAILED = 420;
 const int ERROR_NO_REFUND = 421;
 
 ;; Storage structure (matches data-model.md)
+global slice ctx_jetton_minter;
+global slice ctx_creator;
+global int ctx_launch_timestamp;
+global int ctx_hard_cap;
+global int ctx_soft_cap;
+global int ctx_time_limit;
+global int ctx_total_supply;
 global int ctx_tokens_sold;
 global int ctx_reserve_balance;
 global int ctx_total_raised;
@@ -33,18 +40,21 @@ global int ctx_is_graduated;
 global int ctx_is_failed;
 global int ctx_soft_cap_reached;
 global int ctx_soft_cap_timestamp;
+global slice ctx_dex_pool;
 global int ctx_liquidity_accumulated;
+global cell ctx_buyer_contributions;
+global cell ctx_refund_claims;
 
 () load_data() impure {
     slice ds = get_data().begin_parse();
 
-    slice jetton_minter = ds~load_msg_addr();
-    slice creator = ds~load_msg_addr();
-    int launch_timestamp = ds~load_uint(32);
-    int hard_cap = ds~load_coins();
-    int soft_cap = ds~load_coins();
-    int time_limit = ds~load_uint(32);
-    int total_supply = ds~load_coins();
+    ctx_jetton_minter = ds~load_msg_addr();
+    ctx_creator = ds~load_msg_addr();
+    ctx_launch_timestamp = ds~load_uint(32);
+    ctx_hard_cap = ds~load_coins();
+    ctx_soft_cap = ds~load_coins();
+    ctx_time_limit = ds~load_uint(32);
+    ctx_total_supply = ds~load_coins();
 
     ctx_tokens_sold = ds~load_coins();
     ctx_reserve_balance = ds~load_coins();
@@ -54,16 +64,36 @@ global int ctx_liquidity_accumulated;
     ctx_soft_cap_reached = ds~load_uint(1);
     ctx_soft_cap_timestamp = ds~load_uint(32);
 
-    slice dex_pool = ds~load_msg_addr();
+    ctx_dex_pool = ds~load_msg_addr();
     ctx_liquidity_accumulated = ds~load_coins();
 
-    cell buyer_contributions = ds~load_ref();
-    cell refund_claims = ds~load_ref();
+    ctx_buyer_contributions = ds~load_ref();
+    ctx_refund_claims = ds~load_ref();
 }
 
 () save_data() impure {
-    ;; Simplified save - only updates frequently changing fields
-    ;; Full implementation would reconstruct entire storage cell
+    set_data(
+        begin_cell()
+            .store_slice(ctx_jetton_minter)
+            .store_slice(ctx_creator)
+            .store_uint(ctx_launch_timestamp, 32)
+            .store_coins(ctx_hard_cap)
+            .store_coins(ctx_soft_cap)
+            .store_uint(ctx_time_limit, 32)
+            .store_coins(ctx_total_supply)
+            .store_coins(ctx_tokens_sold)
+            .store_coins(ctx_reserve_balance)
+            .store_coins(ctx_total_raised)
+            .store_uint(ctx_is_graduated, 1)
+            .store_uint(ctx_is_failed, 1)
+            .store_uint(ctx_soft_cap_reached, 1)
+            .store_uint(ctx_soft_cap_timestamp, 32)
+            .store_slice(ctx_dex_pool)
+            .store_coins(ctx_liquidity_accumulated)
+            .store_ref(ctx_buyer_contributions)
+            .store_ref(ctx_refund_claims)
+        .end_cell()
+    );
 }
 
 ;; Newton's method for integer square root
@@ -145,6 +175,46 @@ int calculate_tokens_for_ton(int ton_amount, int current_k, int total_supply) in
     return result;
 }
 
+;; Dictionary helper functions
+int dict_get_coins(cell dict, int key) inline {
+    (slice val, int found) = dict.udict_get?(256, key);
+    if (found) {
+        return val~load_coins();
+    }
+    return 0;
+}
+
+cell dict_set_coins(cell dict, int key, int amount) inline {
+    return dict.udict_set_builder(256, key, begin_cell().store_coins(amount));
+}
+
+;; Send mint message to JettonMinter
+() send_mint_message(slice to_address, int amount) impure inline {
+    var msg = begin_cell()
+        .store_uint(0x18, 6)
+        .store_slice(ctx_jetton_minter)
+        .store_coins(100000000) ;; 0.1 TON for gas
+        .store_uint(0, 107)
+        .store_uint(0x15, 32)  ;; mint op
+        .store_uint(0, 64)      ;; query_id
+        .store_slice(to_address)
+        .store_coins(amount)
+        .store_coins(50000000)  ;; forward 0.05 TON
+    .end_cell();
+    send_raw_message(msg, 1);
+}
+
+;; Send TON to address
+() send_ton(slice to_address, int amount, int mode) impure inline {
+    var msg = begin_cell()
+        .store_uint(0x18, 6)
+        .store_slice(to_address)
+        .store_coins(amount)
+        .store_uint(0, 107)
+    .end_cell();
+    send_raw_message(msg, mode);
+}
+
 () recv_internal(int my_balance, int msg_value, cell in_msg_full, slice in_msg_body) impure {
     if (in_msg_body.slice_empty?()) {
         return ();
@@ -167,12 +237,22 @@ int calculate_tokens_for_ton(int ton_amount, int current_k, int total_supply) in
         throw_if(ERROR_ALREADY_GRADUATED, ctx_is_graduated);
         throw_if(ERROR_ALREADY_FAILED, ctx_is_failed);
 
-        ;; Calculate tokens for buy amount
-        ;; Simplified implementation for hackathon
-        ;; Production would include all validations from spec
+        ;; Time-based validation: check deadline if soft cap not reached
+        if (~ ctx_soft_cap_reached) {
+            int deadline = ctx_launch_timestamp + ctx_time_limit;
+            throw_if(ERROR_DEADLINE_PASSED, now() > deadline);
+        }
 
-        int buy_amount = msg_value - 50000000; ;; Reserve 0.05 TON for gas
-        int tokens = buy_amount / BASE_PRICE; ;; Simplified linear for hackathon
+        int buy_amount = msg_value - 100000000; ;; Reserve 0.1 TON for gas
+        throw_if(ERROR_MIN_BUY_NOT_MET, buy_amount < 1000000000); ;; Min 1 TON
+
+        ;; Calculate tokens using bonding curve
+        int tokens = calculate_tokens_for_ton(buy_amount, ctx_tokens_sold, ctx_total_supply);
+        
+        ;; Validate buy limits (2% of remaining or 50M max)
+        int remaining = ctx_total_supply - ctx_tokens_sold;
+        int max_buy = min((remaining * MAX_BUY_PERCENT) / 100, MAX_BUY_ABSOLUTE);
+        throw_if(ERROR_MAX_BUY_EXCEEDED, tokens > max_buy);
 
         ;; Split funds (50/40/5/5)
         int reserve_add = (buy_amount * RESERVE_PERCENT) / 100;
@@ -185,16 +265,31 @@ int calculate_tokens_for_ton(int ton_amount, int current_k, int total_supply) in
         ctx_total_raised += buy_amount;
         ctx_tokens_sold += tokens;
 
-        ;; Check soft cap
-        ;; Placeholder - full implementation would check and update flags
+        ;; Track buyer contribution for potential refunds
+        int sender_hash = slice_hash(sender_address);
+        int current_contribution = dict_get_coins(ctx_buyer_contributions, sender_hash);
+        ctx_buyer_contributions = dict_set_coins(ctx_buyer_contributions, sender_hash, current_contribution + buy_amount);
 
-        ;; Check hard cap and graduate
-        ;; Placeholder - full implementation would trigger graduation
+        ;; Check and update soft cap
+        if ((~ ctx_soft_cap_reached) & (ctx_total_raised >= ctx_soft_cap)) {
+            ctx_soft_cap_reached = -1;
+            ctx_soft_cap_timestamp = now();
+        }
+
+        ;; Check hard cap and trigger graduation
+        if (ctx_total_raised >= ctx_hard_cap) {
+            ctx_is_graduated = -1;
+            ;; TODO: Trigger DEX pool deployment
+        }
+
+        ;; Send creator and platform fees
+        send_ton(ctx_creator, creator_fee, 1);
+        ;; Platform fee would go to platform address (not implemented in simplified version)
 
         save_data();
 
         ;; Mint tokens to buyer
-        ;; Placeholder - send message to jetton_minter
+        send_mint_message(sender_address, tokens);
 
         return ();
     }
@@ -206,9 +301,9 @@ int calculate_tokens_for_ton(int ton_amount, int current_k, int total_supply) in
 
         int token_amount = in_msg_body~load_coins();
 
-        ;; Calculate return amount
-        ;; Simplified implementation for hackathon
-        int return_amount = (token_amount * BASE_PRICE * 99) / 100; ;; 1% fee
+        ;; Calculate return amount using bonding curve
+        int cost = calculate_buy_cost(ctx_tokens_sold - token_amount, token_amount, ctx_total_supply);
+        int return_amount = (cost * (100 - SELL_FEE_PERCENT)) / 100;
 
         throw_if(ERROR_INSUFFICIENT_RESERVE, ctx_reserve_balance < return_amount);
 
@@ -218,8 +313,10 @@ int calculate_tokens_for_ton(int ton_amount, int current_k, int total_supply) in
         save_data();
 
         ;; Send TON back to seller
-        ;; Burn tokens
-        ;; Placeholder - full implementation
+        send_ton(sender_address, return_amount, 1);
+
+        ;; Note: Token burning would be handled by the seller calling burn on their wallet
+        ;; which would then notify the minter
 
         return ();
     }
@@ -229,11 +326,20 @@ int calculate_tokens_for_ton(int ton_amount, int current_k, int total_supply) in
         throw_unless(ERROR_NOT_FAILED, ctx_is_failed);
 
         ;; Look up refund amount for sender
-        ;; Placeholder - full implementation would use refund_claims dictionary
+        int sender_hash = slice_hash(sender_address);
+        int refund_amount = dict_get_coins(ctx_refund_claims, sender_hash);
+        
+        throw_unless(ERROR_NO_REFUND, refund_amount > 0);
 
-        ;; Transfer refund
-        ;; Burn tokens
         ;; Remove from refund_claims
+        ctx_refund_claims = ctx_refund_claims.udict_delete?(256, sender_hash);
+
+        save_data();
+
+        ;; Transfer refund (90% of contribution, 10% covers fees)
+        send_ton(sender_address, refund_amount, 1);
+
+        ;; Note: Token burning would be handled separately
 
         return ();
     }
@@ -241,7 +347,19 @@ int calculate_tokens_for_ton(int ton_amount, int current_k, int total_supply) in
     ;; Trigger failure check (0x04)
     if (op == 0x04) {
         ;; Check if deadline passed and soft cap not reached
-        ;; Placeholder - full implementation
+        if (~ ctx_soft_cap_reached) {
+            int deadline = ctx_launch_timestamp + ctx_time_limit;
+            if (now() > deadline) {
+                ctx_is_failed = -1;
+                
+                ;; Calculate refunds for all buyers (90% of contributions)
+                ;; In a full implementation, we would iterate through buyer_contributions
+                ;; For now, individual buyers will call claim_refund
+                ;; The refund_claims dictionary would be populated here
+                
+                save_data();
+            }
+        }
 
         return ();
     }

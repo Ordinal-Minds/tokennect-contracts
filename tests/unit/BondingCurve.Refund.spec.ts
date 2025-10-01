@@ -1,7 +1,7 @@
 import { Blockchain, SandboxContract, TreasuryContract } from '@ton/sandbox';
 import { Cell, toNano } from '@ton/core';
 import { BondingCurve } from '../../wrappers/BondingCurve';
-import '@ton/test-utils';
+
 
 describe('BondingCurve - Refund System', () => {
     let code: Cell;

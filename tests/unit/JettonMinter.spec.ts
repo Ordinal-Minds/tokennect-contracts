@@ -1,7 +1,7 @@
 import { Blockchain, SandboxContract, TreasuryContract } from '@ton/sandbox';
 import { Cell, toNano, Address, beginCell } from '@ton/core';
 import { JettonMinter, buildJettonContent } from '../../wrappers/JettonMinter';
-import '@ton/test-utils';
+
 
 describe('JettonMinter', () => {
     let code: Cell;
