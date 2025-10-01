@@ -47,7 +47,34 @@
 ## Constitution Check
 *GATE: Must pass before Phase 0 research. Re-check after Phase 1 design.*
 
-[Gates determined based on constitution file]
+### Hackathon Speed Check
+- [ ] Total estimated time < 5 hours (Planning 30m, Setup 15m, Core 3h, Testing 45m, Polish 30m)
+- [ ] No single task exceeds 45 minutes
+- [ ] All dependencies pre-identified and available
+
+### Simplicity Check
+- [ ] Using simplest possible implementation for current requirements
+- [ ] No premature abstractions or patterns added
+- [ ] Using familiar technologies (list below)
+- [ ] Inline solutions preferred for small scope
+
+### Best Practices Check
+- [ ] Clear naming conventions defined
+- [ ] Type safety enabled where available
+- [ ] Error handling planned for user-facing flows
+- [ ] Basic input validation included
+- [ ] Happy path testing planned (comprehensive testing skipped for speed)
+
+### Follow Directions Check
+- [ ] Implementation matches spec exactly (no creative additions)
+- [ ] All ambiguities clarified before coding begins
+- [ ] Spec-driven: requirements documented before implementation
+
+### MVP Focus Check
+- [ ] Core value proposition clearly defined
+- [ ] Feature set minimized to demonstrable essentials
+- [ ] Single working flow prioritized over multiple partial flows
+- [ ] Demo script defines scope boundary
 
 ## Project Structure
 
@@ -216,4 +243,4 @@ directories captured above]
 - [ ] Complexity deviations documented
 
 ---
-*Based on Constitution v2.1.1 - See `/memory/constitution.md`*
+*Based on Constitution v1.0.0 - See `.specify/memory/constitution.md`*
