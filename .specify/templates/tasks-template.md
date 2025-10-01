@@ -47,8 +47,8 @@
 - [ ] T002 Initialize [language] project with [framework] dependencies
 - [ ] T003 [P] Configure linting and formatting tools
 
-## Phase 3.2: Tests First (TDD) ⚠️ MUST COMPLETE BEFORE 3.3
-**CRITICAL: These tests MUST be written and MUST FAIL before ANY implementation**
+## Phase 3.2: Tests First (Happy Path Focus) ⚠️ MUST COMPLETE BEFORE 3.3
+**HACKATHON MODE: Focus on happy path tests only. Write tests, verify they fail, then implement.**
 - [ ] T004 [P] Contract test POST /api/users in tests/contract/test_users_post.py
 - [ ] T005 [P] Contract test GET /api/users/{id} in tests/contract/test_users_get.py
 - [ ] T006 [P] Integration test user registration in tests/integration/test_registration.py
@@ -94,8 +94,9 @@ Task: "Integration test auth in tests/integration/test_auth.py"
 ## Notes
 - [P] tasks = different files, no dependencies
 - Verify tests fail before implementing
-- Commit after each task
-- Avoid: vague tasks, same file conflicts
+- Commit after each task or logical group (speed over granularity)
+- Track time: No task should exceed 45 minutes
+- Avoid: vague tasks, same file conflicts, over-engineering
 
 ## Task Generation Rules
 *Applied during main() execution*

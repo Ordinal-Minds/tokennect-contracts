@@ -1,0 +1,7 @@
+node_modules/
+dist/
+.env
+*.fif
+*.boc
+coverage/
+.DS_Store

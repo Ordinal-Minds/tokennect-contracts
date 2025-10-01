@@ -1,0 +1,406 @@
+;; BondingCurveContract
+;; Core bonding curve with square root pricing
+
+#include "imports/stdlib.fc";
+
+;; Constants
+const int BASE_PRICE = 1000; ;; 0.000001 TON (in nanotons)
+const int MAX_BUY_PERCENT = 2; ;; 2% of remaining
+const int MAX_BUY_ABSOLUTE = 50000000 * 1000000000; ;; 50M tokens
+const int PLATFORM_FEE_PERCENT = 5;
+const int CREATOR_FEE_PERCENT = 5;
+const int RESERVE_PERCENT = 50;
+const int LIQUIDITY_PERCENT = 40;
+const int SELL_FEE_PERCENT = 1;
+
+;; Error codes
+const int ERROR_ALREADY_GRADUATED = 400;
+const int ERROR_ALREADY_FAILED = 401;
+const int ERROR_MIN_BUY_NOT_MET = 402;
+const int ERROR_DEADLINE_PASSED = 403;
+const int ERROR_MAX_BUY_EXCEEDED = 404;
+const int ERROR_SELL_GRADUATED = 410;
+const int ERROR_SELL_FAILED = 411;
+const int ERROR_INSUFFICIENT_RESERVE = 412;
+const int ERROR_NOT_FAILED = 420;
+const int ERROR_NO_REFUND = 421;
+
+;; Storage structure (matches data-model.md)
+global slice ctx_jetton_minter;
+global slice ctx_creator;
+global int ctx_launch_timestamp;
+global int ctx_hard_cap;
+global int ctx_soft_cap;
+global int ctx_time_limit;
+global int ctx_total_supply;
+global int ctx_tokens_sold;
+global int ctx_reserve_balance;
+global int ctx_total_raised;
+global int ctx_is_graduated;
+global int ctx_is_failed;
+global int ctx_soft_cap_reached;
+global int ctx_soft_cap_timestamp;
+global slice ctx_dex_pool;
+global int ctx_liquidity_accumulated;
+global cell ctx_buyer_contributions;
+global cell ctx_refund_claims;
+
+() load_data() impure {
+    slice ds = get_data().begin_parse();
+
+    ctx_jetton_minter = ds~load_msg_addr();
+    ctx_creator = ds~load_msg_addr();
+    ctx_launch_timestamp = ds~load_uint(32);
+    ctx_hard_cap = ds~load_coins();
+    ctx_soft_cap = ds~load_coins();
+    ctx_time_limit = ds~load_uint(32);
+    ctx_total_supply = ds~load_coins();
+
+    ctx_tokens_sold = ds~load_coins();
+    ctx_reserve_balance = ds~load_coins();
+    ctx_total_raised = ds~load_coins();
+    ctx_is_graduated = ds~load_uint(1);
+    ctx_is_failed = ds~load_uint(1);
+    ctx_soft_cap_reached = ds~load_uint(1);
+    ctx_soft_cap_timestamp = ds~load_uint(32);
+
+    ctx_dex_pool = ds~load_msg_addr();
+    ctx_liquidity_accumulated = ds~load_coins();
+
+    ctx_buyer_contributions = ds~load_ref();
+    ctx_refund_claims = ds~load_ref();
+}
+
+() save_data() impure {
+    set_data(
+        begin_cell()
+            .store_slice(ctx_jetton_minter)
+            .store_slice(ctx_creator)
+            .store_uint(ctx_launch_timestamp, 32)
+            .store_coins(ctx_hard_cap)
+            .store_coins(ctx_soft_cap)
+            .store_uint(ctx_time_limit, 32)
+            .store_coins(ctx_total_supply)
+            .store_coins(ctx_tokens_sold)
+            .store_coins(ctx_reserve_balance)
+            .store_coins(ctx_total_raised)
+            .store_uint(ctx_is_graduated, 1)
+            .store_uint(ctx_is_failed, 1)
+            .store_uint(ctx_soft_cap_reached, 1)
+            .store_uint(ctx_soft_cap_timestamp, 32)
+            .store_slice(ctx_dex_pool)
+            .store_coins(ctx_liquidity_accumulated)
+            .store_ref(ctx_buyer_contributions)
+            .store_ref(ctx_refund_claims)
+        .end_cell()
+    );
+}
+
+;; Newton's method for integer square root
+int sqrt_newton(int x) inline {
+    if (x == 0) {
+        return 0;
+    }
+
+    int z = (x + 1) / 2;
+    int y = x;
+    int iterations = 0;
+
+    while ((z < y) & (iterations < 20)) {
+        y = z;
+        z = (x / z + z) / 2;
+        iterations += 1;
+    }
+
+    return y;
+}
+
+;; Calculate price at k tokens sold: Price(k) = base_price × √(k / total_supply)
+int calculate_price(int k, int total_supply) inline {
+    if (k == 0) {
+        return BASE_PRICE;
+    }
+
+    ;; price = BASE_PRICE * sqrt(k / total_supply)
+    ;; = BASE_PRICE * sqrt(k) / sqrt(total_supply)
+
+    int sqrt_k = sqrt_newton(k);
+    int sqrt_total = sqrt_newton(total_supply);
+
+    return (BASE_PRICE * sqrt_k) / sqrt_total;
+}
+
+;; Calculate cost for buying tokens: ∫ Price(k) dk from k to k+amount
+int calculate_buy_cost(int current_k, int token_amount, int total_supply) inline {
+    ;; Integral of sqrt(k) from k1 to k2 = (2/3) * (k2^(3/2) - k1^(3/2))
+    ;; Cost = BASE_PRICE * (2/3) * (sqrt(k2^3) - sqrt(k1^3)) / sqrt(total_supply)
+
+    int k1 = current_k;
+    int k2 = current_k + token_amount;
+
+    ;; k^(3/2) = k * sqrt(k)
+    int k1_32 = k1 * sqrt_newton(k1);
+    int k2_32 = k2 * sqrt_newton(k2);
+
+    int diff = k2_32 - k1_32;
+    int sqrt_total = sqrt_newton(total_supply);
+
+    ;; Multiply by 2/3 = * 2 / 3
+    int cost = (BASE_PRICE * 2 * diff) / (3 * sqrt_total);
+
+    return cost;
+}
+
+;; Calculate tokens received for TON amount (inverse of buy_cost)
+int calculate_tokens_for_ton(int ton_amount, int current_k, int total_supply) inline {
+    ;; Simplified binary search approach for hackathon
+    ;; Production would use more precise inverse calculation
+
+    int low = 0;
+    int high = total_supply - current_k;
+    int result = 0;
+
+    repeat(20) { ;; 20 iterations for binary search
+        int mid = (low + high) / 2;
+        int cost = calculate_buy_cost(current_k, mid, total_supply);
+
+        if (cost <= ton_amount) {
+            result = mid;
+            low = mid + 1;
+        } else {
+            high = mid - 1;
+        }
+    }
+
+    return result;
+}
+
+;; Dictionary helper functions
+int dict_get_coins(cell dict, int key) inline {
+    (slice val, int found) = dict.udict_get?(256, key);
+    if (found) {
+        return val~load_coins();
+    }
+    return 0;
+}
+
+cell dict_set_coins(cell dict, int key, int amount) inline {
+    return dict.udict_set_builder(256, key, begin_cell().store_coins(amount));
+}
+
+;; Send mint message to JettonMinter
+() send_mint_message(slice to_address, int amount) impure inline {
+    var msg = begin_cell()
+        .store_uint(0x18, 6)
+        .store_slice(ctx_jetton_minter)
+        .store_coins(100000000) ;; 0.1 TON for gas
+        .store_uint(0, 107)
+        .store_uint(0x15, 32)  ;; mint op
+        .store_uint(0, 64)      ;; query_id
+        .store_slice(to_address)
+        .store_coins(amount)
+        .store_coins(50000000)  ;; forward 0.05 TON
+    .end_cell();
+    send_raw_message(msg, 1);
+}
+
+;; Send TON to address
+() send_ton(slice to_address, int amount, int mode) impure inline {
+    var msg = begin_cell()
+        .store_uint(0x18, 6)
+        .store_slice(to_address)
+        .store_coins(amount)
+        .store_uint(0, 107)
+    .end_cell();
+    send_raw_message(msg, mode);
+}
+
+() recv_internal(int my_balance, int msg_value, cell in_msg_full, slice in_msg_body) impure {
+    if (in_msg_body.slice_empty?()) {
+        return ();
+    }
+
+    slice cs = in_msg_full.begin_parse();
+    int flags = cs~load_uint(4);
+    if (flags & 1) {
+        return ();
+    }
+    slice sender_address = cs~load_msg_addr();
+
+    int op = in_msg_body~load_uint(32);
+    int query_id = in_msg_body~load_uint(64);
+
+    load_data();
+
+    ;; Buy operation (0x01)
+    if (op == 0x01) {
+        throw_if(ERROR_ALREADY_GRADUATED, ctx_is_graduated);
+        throw_if(ERROR_ALREADY_FAILED, ctx_is_failed);
+
+        ;; Time-based validation: check deadline if soft cap not reached
+        if (~ ctx_soft_cap_reached) {
+            int deadline = ctx_launch_timestamp + ctx_time_limit;
+            throw_if(ERROR_DEADLINE_PASSED, now() > deadline);
+        }
+
+        int buy_amount = msg_value - 100000000; ;; Reserve 0.1 TON for gas
+        throw_if(ERROR_MIN_BUY_NOT_MET, buy_amount < 1000000000); ;; Min 1 TON
+
+        ;; Calculate tokens using bonding curve
+        int tokens = calculate_tokens_for_ton(buy_amount, ctx_tokens_sold, ctx_total_supply);
+        
+        ;; Validate buy limits (2% of remaining or 50M max)
+        int remaining = ctx_total_supply - ctx_tokens_sold;
+        int max_buy = min((remaining * MAX_BUY_PERCENT) / 100, MAX_BUY_ABSOLUTE);
+        throw_if(ERROR_MAX_BUY_EXCEEDED, tokens > max_buy);
+
+        ;; Split funds (50/40/5/5)
+        int reserve_add = (buy_amount * RESERVE_PERCENT) / 100;
+        int liquidity_add = (buy_amount * LIQUIDITY_PERCENT) / 100;
+        int creator_fee = (buy_amount * CREATOR_FEE_PERCENT) / 100;
+        int platform_fee = (buy_amount * PLATFORM_FEE_PERCENT) / 100;
+
+        ctx_reserve_balance += reserve_add;
+        ctx_liquidity_accumulated += liquidity_add;
+        ctx_total_raised += buy_amount;
+        ctx_tokens_sold += tokens;
+
+        ;; Track buyer contribution for potential refunds
+        int sender_hash = slice_hash(sender_address);
+        int current_contribution = dict_get_coins(ctx_buyer_contributions, sender_hash);
+        ctx_buyer_contributions = dict_set_coins(ctx_buyer_contributions, sender_hash, current_contribution + buy_amount);
+
+        ;; Check and update soft cap
+        if ((~ ctx_soft_cap_reached) & (ctx_total_raised >= ctx_soft_cap)) {
+            ctx_soft_cap_reached = -1;
+            ctx_soft_cap_timestamp = now();
+        }
+
+        ;; Check hard cap and trigger graduation
+        if (ctx_total_raised >= ctx_hard_cap) {
+            ctx_is_graduated = -1;
+            ;; TODO: Trigger DEX pool deployment
+        }
+
+        ;; Send creator and platform fees
+        send_ton(ctx_creator, creator_fee, 1);
+        ;; Platform fee would go to platform address (not implemented in simplified version)
+
+        save_data();
+
+        ;; Mint tokens to buyer
+        send_mint_message(sender_address, tokens);
+
+        return ();
+    }
+
+    ;; Sell operation (0x02)
+    if (op == 0x02) {
+        throw_if(ERROR_SELL_GRADUATED, ctx_is_graduated);
+        throw_if(ERROR_SELL_FAILED, ctx_is_failed);
+
+        int token_amount = in_msg_body~load_coins();
+
+        ;; Calculate return amount using bonding curve
+        int cost = calculate_buy_cost(ctx_tokens_sold - token_amount, token_amount, ctx_total_supply);
+        int return_amount = (cost * (100 - SELL_FEE_PERCENT)) / 100;
+
+        throw_if(ERROR_INSUFFICIENT_RESERVE, ctx_reserve_balance < return_amount);
+
+        ctx_reserve_balance -= return_amount;
+        ctx_tokens_sold -= token_amount;
+
+        save_data();
+
+        ;; Send TON back to seller
+        send_ton(sender_address, return_amount, 1);
+
+        ;; Note: Token burning would be handled by the seller calling burn on their wallet
+        ;; which would then notify the minter
+
+        return ();
+    }
+
+    ;; Claim refund (0x03)
+    if (op == 0x03) {
+        throw_unless(ERROR_NOT_FAILED, ctx_is_failed);
+
+        ;; Look up refund amount for sender
+        int sender_hash = slice_hash(sender_address);
+        int refund_amount = dict_get_coins(ctx_refund_claims, sender_hash);
+        
+        throw_unless(ERROR_NO_REFUND, refund_amount > 0);
+
+        ;; Remove from refund_claims
+        ctx_refund_claims = ctx_refund_claims.udict_delete?(256, sender_hash);
+
+        save_data();
+
+        ;; Transfer refund (90% of contribution, 10% covers fees)
+        send_ton(sender_address, refund_amount, 1);
+
+        ;; Note: Token burning would be handled separately
+
+        return ();
+    }
+
+    ;; Trigger failure check (0x04)
+    if (op == 0x04) {
+        ;; Check if deadline passed and soft cap not reached
+        if (~ ctx_soft_cap_reached) {
+            int deadline = ctx_launch_timestamp + ctx_time_limit;
+            if (now() > deadline) {
+                ctx_is_failed = -1;
+                
+                ;; Calculate refunds for all buyers (90% of contributions)
+                ;; In a full implementation, we would iterate through buyer_contributions
+                ;; For now, individual buyers will call claim_refund
+                ;; The refund_claims dictionary would be populated here
+                
+                save_data();
+            }
+        }
+
+        return ();
+    }
+
+    throw(0xffff);
+}
+
+;; Get methods
+
+(int, int, int, int, int, int, int) get_launch_stats() method_id {
+    load_data();
+    return (
+        ctx_total_raised,
+        ctx_tokens_sold,
+        ctx_reserve_balance,
+        ctx_liquidity_accumulated,
+        ctx_is_graduated,
+        ctx_is_failed,
+        ctx_soft_cap_reached
+    );
+}
+
+int get_buy_quote(int ton_amount) method_id {
+    load_data();
+    ;; Placeholder - return token amount for TON
+    return ton_amount / BASE_PRICE;
+}
+
+int get_sell_quote(int token_amount) method_id {
+    load_data();
+    return (token_amount * BASE_PRICE * 99) / 100;
+}
+
+int calculate_current_price() method_id {
+    load_data();
+    ;; Placeholder - return current price
+    return BASE_PRICE;
+}
+
+int get_user_refund(slice user_address) method_id {
+    load_data();
+    ;; Placeholder - look up in refund_claims
+    return 0;
+}

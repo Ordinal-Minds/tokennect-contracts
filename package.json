@@ -1,0 +1,40 @@
+{
+  "name": "token-launch-platform",
+  "version": "1.0.0",
+  "description": "TON blockchain token launch platform with bonding curve",
+  "main": "index.js",
+  "scripts": {
+    "test": "jest",
+    "test:unit": "jest tests/unit",
+    "test:integration": "jest tests/integration",
+    "build": "ts-node scripts/compile-contracts.ts",
+    "deploy:factory": "ts-node scripts/deploy-factory.ts",
+    "create:launch": "ts-node scripts/create-launch.ts",
+    "buy": "ts-node scripts/buy-tokens.ts",
+    "compile": "ts-node scripts/compile-contracts.ts"
+  },
+  "keywords": [
+    "ton",
+    "blockchain",
+    "bonding-curve",
+    "token-launch",
+    "defi"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "@ton/core": "^0.56.0",
+    "@ton/crypto": "^3.2.0",
+    "@ton/sandbox": "^0.16.0",
+    "@ton/ton": "^13.11.0",
+    "@types/jest": "^29.5.11",
+    "@types/node": "^20.10.6",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.1.1",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.3.3"
+  },
+  "dependencies": {
+    "dotenv": "^16.3.1"
+  }
+}
